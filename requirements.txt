@@ -1,4 +1,7 @@
 streamlit
+sqlalchemy
+bcrypt
 pandas
-altair
-xlsxwriter
+matplotlib
+numpy
+psycopg2-binary
