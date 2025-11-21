@@ -1,44 +1,46 @@
 """
-app.py - CISP Governance (versão melhorada)
-Melhorias: login em página única, permissões refinadas, dashboard Altair,
-integração PostgreSQL (SQLAlchemy), audit logs, animação CSS simples.
+app.py - CISP Governance com página de Detecção Automática (simulada)
+- Login em página única
+- Roles: admin, gestor, analista, auditor
+- SQLAlchemy (Postgres ou SQLite)
+- Audit logs
+- Dashboard com Altair
+- Página "Detecção Automática de Riscos" (simulação)
 """
 
 import os
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 from functools import wraps
-import hashlib
-import json
+import random
 
 import streamlit as st
 import pandas as pd
 import altair as alt
+import matplotlib.pyplot as plt
 from sqlalchemy import (
     create_engine, MetaData, Table, Column, Integer, String, Text,
-    Date, DateTime, Boolean, ForeignKey, inspect
+    Date, DateTime, Boolean, ForeignKey, select, func, inspect
 )
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.sql import select, func
 from dotenv import load_dotenv
 import bcrypt
 
 load_dotenv()
 
 # --------------------------
-# CONFIGURAÇÃO DO BANCO
+# Config DB
 # --------------------------
-DATABASE_URL = os.getenv("DATABASE_URL")  # e.g. postgresql+psycopg2://user:pass@host:5432/db
-USE_SQLITE_FALLBACK = False
-
+DATABASE_URL = os.getenv("DATABASE_URL")  # e.g. postgresql+psycopg2://user:pass@host:5432/dbname
 if DATABASE_URL:
     engine = create_engine(DATABASE_URL, echo=False, future=True)
 else:
-    USE_SQLITE_FALLBACK = True
     engine = create_engine("sqlite:///cisp_gov.db", echo=False, future=True)
 
 metadata = MetaData()
 
-# ---------- tabelas ----------
+# --------------------------
+# Tables
+# --------------------------
 users = Table(
     "users", metadata,
     Column("id", Integer, primary_key=True),
@@ -154,64 +156,58 @@ audit_logs = Table(
 )
 
 # --------------------------
-# BOOTSTRAP DAS TABELAS E ADMIN DEFAULT
+# Bootstrap
 # --------------------------
 def bootstrap():
-    inspector = inspect(engine)
     try:
         metadata.create_all(engine)
     except OperationalError as e:
-        st.error(f"Erro ao criar tabelas: {e}")
-        return
-
-    # criar admin se não existir
+        st.error(f"Erro criando tabelas: {e}")
+    # ensure admin exists
     with engine.connect() as conn:
-        exists = conn.execute(select(users.c.id).where(users.c.username == "admin")).first()
-        if not exists:
+        r = conn.execute(select(users.c.id).where(users.c.username == "admin")).first()
+        if not r:
             pw = hash_password("admin123")
             conn.execute(users.insert().values(username="admin", password_hash=pw, role="admin", full_name="Administrador"))
             conn.commit()
 
 # --------------------------
-# UTILITÁRIOS DE SEGURANÇA
+# Security helpers
 # --------------------------
 def hash_password(password: str) -> str:
-    pw = password.encode("utf-8")
-    salt = bcrypt.gensalt()
-    return bcrypt.hashpw(pw, salt).decode("utf-8")
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 def verify_password(password: str, hashed: str) -> bool:
-    return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
 
 def log_action(actor, role, action, target_table=None, target_id=None, details=None):
     with engine.connect() as conn:
-        conn.execute(
-            audit_logs.insert().values(
-                actor=actor, role=role, action=action,
-                target_table=target_table, target_id=target_id, details=details, created_at=datetime.utcnow()
-            )
-        )
+        conn.execute(audit_logs.insert().values(
+            actor=actor, role=role, action=action,
+            target_table=target_table, target_id=target_id,
+            details=details, created_at=datetime.utcnow()
+        ))
         conn.commit()
 
 def require_roles(allowed):
-    """decorator para checar permissões antes de executar funções de UI que alteram dados"""
     def deco(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
             user = st.session_state.get("user")
             if not user:
-                st.error("Acesso negado: usuário não autenticado.")
+                st.error("Acesso negado: autentique-se.")
                 return
-            if user["role"] == "admin":
-                return func(*args, **kwargs)
-            if user["role"] in allowed:
+            if user["role"] == "admin" or user["role"] in allowed:
                 return func(*args, **kwargs)
             st.warning("Permissão negada para o seu perfil.")
         return wrapper
     return deco
 
 # --------------------------
-# AUTENTICAÇÃO (LOGIN PÁGINA ÚNICA)
+# UI: Login page (single page)
 # --------------------------
 def login_ui():
     st.markdown(
@@ -219,7 +215,7 @@ def login_ui():
         <style>
         .bg {
             background: linear-gradient(135deg,#0f1724 0%, #071426 100%);
-            height: 220px;
+            height: 160px;
             border-radius: 12px;
             padding: 18px;
             color: white;
@@ -233,8 +229,8 @@ def login_ui():
         }
         .pulse {
             display:inline-block;
-            width:14px;height:14px;
-            border-radius:14px;
+            width:12px;height:12px;
+            border-radius:12px;
             background: #2bd37b;
             box-shadow: 0 0 0 rgba(43,211,123, .7);
             -webkit-animation: pulse 1.8s infinite;
@@ -247,11 +243,9 @@ def login_ui():
             100% { box-shadow: 0 0 0 0 rgba(43,211,123, 0); }
         }
         </style>
-        """,
-        unsafe_allow_html=True
+        """, unsafe_allow_html=True
     )
     st.markdown('<div class="bg"><span class="pulse"></span><strong>🔐 CISP — Plataforma de Governança</strong><div style="font-size:12px;margin-top:6px;">Segurança, Riscos e Proteção de Dados</div></div>', unsafe_allow_html=True)
-
     st.markdown('<div class="card">', unsafe_allow_html=True)
     with st.form("login_form", clear_on_submit=False):
         col1, col2 = st.columns([2, 1])
@@ -270,7 +264,7 @@ def login_ui():
     st.markdown('</div>', unsafe_allow_html=True)
 
 # --------------------------
-# PÁGINA PRINCIPAL / NAV
+# Navigation bar and role-based menu
 # --------------------------
 def nav_bar():
     user = st.session_state.get("user")
@@ -282,7 +276,7 @@ def nav_bar():
             del st.session_state["user"]
             st.rerun()
 
-    # construção de menu baseada em role
+    # base pages
     base_pages = [
         ("Dashboard", page_dashboard),
         ("Ativos & Riscos", page_assets_risks),
@@ -290,25 +284,32 @@ def nav_bar():
         ("Proteção de Dados", page_privacy),
         ("Auditorias", page_audits),
         ("Treinamentos", page_trainings),
+        ("Detecção Automática", page_detect_autonomous),
     ]
-    # políticas só para admin e gestor (analista não vê políticas)
+
+    # build pages according to role
     pages = []
     for name, func in base_pages:
-        if name == "Proteção de Dados":
-            # auditor só vê Auditorias e Incidentes - mas ainda permitimos Proteção de Dados para gestor/analista/admin
-            if user["role"] == "auditor":
-                continue
+        # auditor sees only Incidentes e Auditorias
+        if user["role"] == "auditor":
+            continue  # will override later
+        # analista não vê Políticas
+        if name == "Detecção Automática":
+            # show to gestor, admin, analista (not auditor)
+            if user["role"] in ("gestor","admin","analista"):
+                pages.append((name, func))
+            continue
         pages.append((name, func))
 
-    # adicionar Políticas apenas para admin e gestor
+    # insert Policies only for admin and gestor
     if user["role"] in ("admin", "gestor"):
         pages.insert(1, ("Políticas", page_policies))
 
-    # auditor só vê Auditorias e Incidentes
+    # auditor only sees Incidentes e Auditorias
     if user["role"] == "auditor":
         pages = [("Incidentes", page_incidents), ("Auditorias", page_audits)]
 
-    # gestor vê tudo exceto Administração; admin verá Administração depois
+    # admin gets Admin page
     if user["role"] == "admin":
         pages.append(("Administração", page_admin))
 
@@ -320,32 +321,28 @@ def nav_bar():
             break
 
 # --------------------------
-# PÁGINAS / FUNCIONALIDADES
+# Pages
 # --------------------------
 def page_dashboard():
     st.header("📊 Painel / Dashboard")
-    # indicadores gerais
     with engine.connect() as conn:
-        pol_count = conn.execute(select(func.count()).select_from(policies)).scalar()
-        risk_count = conn.execute(select(func.count()).select_from(risks)).scalar()
-        inc_count = conn.execute(select(func.count()).select_from(incidents)).scalar()
-        dsar_count = conn.execute(select(func.count()).select_from(dsar)).scalar()
-
-        # riscos para matriz
+        pol_count = conn.execute(select(func.count()).select_from(policies)).scalar() or 0
+        risk_count = conn.execute(select(func.count()).select_from(risks)).scalar() or 0
+        inc_count = conn.execute(select(func.count()).select_from(incidents)).scalar() or 0
+        dsar_count = conn.execute(select(func.count()).select_from(dsar)).scalar() or 0
         risk_rows = pd.read_sql(select(risks), conn)
         inc_rows = pd.read_sql(select(incidents), conn)
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Políticas", pol_count or 0)
-    col2.metric("Riscos", risk_count or 0)
-    col3.metric("Incidentes", inc_count or 0)
-    col4.metric("Solicitações (DSAR)", dsar_count or 0)
+    col1.metric("Políticas", pol_count)
+    col2.metric("Riscos", risk_count)
+    col3.metric("Incidentes", inc_count)
+    col4.metric("Solicitações (DSAR)", dsar_count)
 
     st.markdown("### Matriz de Risco (probabilidade x impacto)")
     if risk_rows.empty:
         st.info("Não há riscos cadastrados")
     else:
-        # preparar dados
         risk_rows["likelihood"] = risk_rows["likelihood"].astype(int)
         risk_rows["impact"] = risk_rows["impact"].astype(int)
         risk_rows["size"] = risk_rows["residual"].fillna(1).astype(int)
@@ -355,7 +352,7 @@ def page_dashboard():
             size=alt.Size("size:Q", title="Risco Residual"),
             color=alt.Color("status:N", title="Status"),
             tooltip=["id","title","owner","controls","residual"]
-        ).properties(height=380)
+        ).properties(height=360)
         st.altair_chart(chart, use_container_width=True)
 
     st.markdown("### Severidade dos incidentes")
@@ -381,16 +378,12 @@ def page_dashboard():
         st.session_state["_open_tab"] = "dsar_new"
         st.rerun()
 
-# --------------------------
-# POLICIES PAGE
-# --------------------------
-@require_roles(("gestor",))  # allow gestor and admin via decorator logic
+@require_roles(("gestor",))
 def page_policies():
     st.header("📘 Políticas")
     with engine.connect() as conn:
         df = pd.read_sql(select(policies), conn)
     st.dataframe(df[["id","title","version","owner","status","effective_date","next_review_date"]].sort_values("updated_at", ascending=False), use_container_width=True)
-
     with st.expander("Criar nova política"):
         with st.form("policy_create"):
             title = st.text_input("Título")
@@ -414,86 +407,76 @@ def page_policies():
                 log_action(st.session_state["user"]["username"], st.session_state["user"]["role"], "create_policy", "policies", new_id, details=title)
                 st.success("Política criada")
 
-# --------------------------
-# ATIVOS E RISCOS
-# --------------------------
 @require_roles(("analista","gestor"))
 def page_assets_risks():
     st.header("🗂️ Ativos e Riscos")
-    tab = st.tabs(["Ativos","Riscos","Importar Exemplo"])[0]  # simplified tabs usage pattern
+    tabs = st.tabs(["Ativos","Riscos"])
     # Ativos
     with engine.connect() as conn:
         assets_df = pd.read_sql(select(assets), conn)
-    st.subheader("Ativos")
-    st.dataframe(assets_df, use_container_width=True)
-    with st.form("asset_create"):
-        name = st.text_input("Nome do ativo")
-        atype = st.selectbox("Tipo", ["Informação","Aplicação","Infraestrutura","Físico","Pessoa"])
-        owner = st.text_input("Responsável")
-        criticality = st.selectbox("Criticidade", ["Baixa","Média","Alta","Crítica"])
-        submitted = st.form_submit_button("Adicionar Ativo")
-        if submitted:
-            with engine.connect() as conn:
-                res = conn.execute(assets.insert().values(name=name, type=atype, owner=owner, criticality=criticality))
-                conn.commit()
-                new_id = res.inserted_primary_key[0]
-            log_action(st.session_state["user"]["username"], st.session_state["user"]["role"], "create_asset", "assets", new_id, details=name)
-            st.success("Ativo adicionado")
-
-    st.divider()
+    with tabs[0]:
+        st.subheader("Ativos")
+        st.dataframe(assets_df, use_container_width=True)
+        with st.form("asset_create"):
+            name = st.text_input("Nome do ativo")
+            atype = st.selectbox("Tipo", ["Informação","Aplicação","Infraestrutura","Físico","Pessoa"])
+            owner = st.text_input("Responsável")
+            criticality = st.selectbox("Criticidade", ["Baixa","Média","Alta","Crítica"])
+            submitted = st.form_submit_button("Adicionar Ativo")
+            if submitted:
+                with engine.connect() as conn:
+                    res = conn.execute(assets.insert().values(name=name, type=atype, owner=owner, criticality=criticality))
+                    conn.commit()
+                    new_id = res.inserted_primary_key[0]
+                log_action(st.session_state["user"]["username"], st.session_state["user"]["role"], "create_asset", "assets", new_id, details=name)
+                st.success("Ativo adicionado")
     # Riscos
-    with engine.connect() as conn:
-        risks_df = pd.read_sql(select(risks), conn)
-    st.subheader("Riscos")
-    st.dataframe(risks_df, use_container_width=True)
-    with st.form("risk_create"):
-        title = st.text_input("Título do risco")
-        description = st.text_area("Descrição")
-        # assets select
+    with tabs[1]:
         with engine.connect() as conn:
+            risks_df = pd.read_sql(select(risks), conn)
             asset_options = pd.read_sql(select(assets.c.id, assets.c.name), conn)
-        asset_choice = st.selectbox("Ativo (opcional)", ["Nenhum"] + asset_options["name"].tolist())
-        asset_id = None
-        if asset_choice != "Nenhum" and not asset_options.empty:
-            asset_id = int(asset_options[asset_options["name"] == asset_choice].id.iloc[0])
-        category = st.selectbox("Categoria", ["Cibernético","Operacional","Físico","Terceiros","Compliance"])
-        likelihood = st.slider("Probabilidade (1-5)", 1, 5, 3)
-        impact = st.slider("Impacto (1-5)", 1, 5, 3)
-        inherent = likelihood * impact
-        controls = st.text_area("Controles aplicados")
-        residual = st.slider("Risco residual (1-25)", 1, 25, inherent)
-        owner = st.text_input("Responsável pelo risco")
-        status = st.selectbox("Status", ["Aberto","Mitigando","Aceito","Transferido","Encerrado"])
-        review_date = st.date_input("Data de revisão", value=date.today())
-        submitted = st.form_submit_button("Registrar Risco")
-        if submitted:
-            with engine.connect() as conn:
-                res = conn.execute(risks.insert().values(
-                    title=title, description=description, asset_id=asset_id, category=category,
-                    likelihood=likelihood, impact=impact, inherent=inherent, controls=controls,
-                    residual=residual, owner=owner, status=status, review_date=review_date, created_at=datetime.utcnow()
-                ))
-                conn.commit()
-                new_id = res.inserted_primary_key[0]
-            log_action(st.session_state["user"]["username"], st.session_state["user"]["role"], "create_risk", "risks", new_id, details=title)
-            st.success("Risco registrado")
+        st.subheader("Riscos")
+        st.dataframe(risks_df, use_container_width=True)
+        with st.form("risk_create"):
+            title = st.text_input("Título do risco")
+            description = st.text_area("Descrição")
+            asset_choice = st.selectbox("Ativo (opcional)", ["Nenhum"] + asset_options["name"].tolist())
+            asset_id = None
+            if asset_choice != "Nenhum" and not asset_options.empty:
+                asset_id = int(asset_options[asset_options["name"] == asset_choice].id.iloc[0])
+            category = st.selectbox("Categoria", ["Cibernético","Operacional","Físico","Terceiros","Compliance"])
+            likelihood = st.slider("Probabilidade (1-5)", 1, 5, 3)
+            impact = st.slider("Impacto (1-5)", 1, 5, 3)
+            inherent = likelihood * impact
+            controls = st.text_area("Controles aplicados")
+            residual = st.slider("Risco residual (1-25)", 1, 25, inherent)
+            owner = st.text_input("Responsável pelo risco")
+            status = st.selectbox("Status", ["Aberto","Mitigando","Aceito","Transferido","Encerrado"])
+            review_date = st.date_input("Data de revisão", value=date.today())
+            submitted = st.form_submit_button("Registrar Risco")
+            if submitted:
+                with engine.connect() as conn:
+                    res = conn.execute(risks.insert().values(
+                        title=title, description=description, asset_id=asset_id, category=category,
+                        likelihood=likelihood, impact=impact, inherent=inherent, controls=controls,
+                        residual=residual, owner=owner, status=status, review_date=review_date, created_at=datetime.utcnow()
+                    ))
+                    conn.commit()
+                    new_id = res.inserted_primary_key[0]
+                log_action(st.session_state["user"]["username"], st.session_state["user"]["role"], "create_risk", "risks", new_id, details=title)
+                st.success("Risco registrado")
 
-# --------------------------
-# INCIDENTS
-# --------------------------
 @require_roles(("analista","gestor","auditor"))
 def page_incidents():
     st.header("🚨 Incidentes")
     with engine.connect() as conn:
         df = pd.read_sql(select(incidents), conn)
     st.dataframe(df.sort_values("detected_at", ascending=False), use_container_width=True)
-
     with st.expander("Registrar novo incidente"):
         with st.form("inc_form"):
             title = st.text_input("Título")
             severity = st.selectbox("Severidade", ["Baixa","Média","Alta","Crítica"])
             category = st.selectbox("Categoria", ["Dados Pessoais","Malware","Disponibilidade","Acesso Indevido","Outros"])
-            # date + time inputs combinados
             detected_date = st.date_input("Data de detecção", value=date.today())
             detected_time = st.time_input("Hora de detecção", value=datetime.now().time())
             detected_at = datetime.combine(detected_date, detected_time)
@@ -521,12 +504,9 @@ def page_incidents():
                 log_action(st.session_state["user"]["username"], st.session_state["user"]["role"], "create_incident", "incidents", new_id, details=title)
                 st.success("Incidente registrado")
 
-# --------------------------
-# PRIVACY (DSAR), AUDITS, TRAININGS
-# --------------------------
 @require_roles(("gestor","analista"))
 def page_privacy():
-    st.header("📄 Proteção de Dados — DSAR")
+    st.header("📄 Proteção de Dados — Solicitações (DSAR)")
     with engine.connect() as conn:
         df = pd.read_sql(select(dsar), conn)
     st.dataframe(df, use_container_width=True)
@@ -591,7 +571,94 @@ def page_trainings():
             st.success("Treinamento registrado")
 
 # --------------------------
-# ADMIN (apenas admin)
+# NOVA PÁGINA: Detecção Automática (SIMULAÇÃO)
+# --------------------------
+@require_roles(("gestor","analista"))
+def page_detect_autonomous():
+    st.header("🔍 Detecção Automática de Riscos (Simulação)")
+    st.info("Esta página simula um fluxo de ingestão de eventos e a geração automática de riscos. Todos os dados são fictícios.")
+
+    # Simular eventos/logs
+    event_types = [
+        "Falha de Login",
+        "Acesso Fora do Horário",
+        "Pico de CPU",
+        "Pico de Rede",
+        "Arquivo Suspeito Detetado",
+        "Serviço Vulnerável (CVE)",
+        "Atividade Anómala de Utilizador",
+        "Erros Repetidos na Aplicação"
+    ]
+    origins = ["Servidor A", "Servidor B", "Laptop XPTO", "Firewall", "API Interna", "Estação RH"]
+    severities = ["Baixa", "Média", "Alta", "Crítica"]
+
+    now = datetime.now()
+    logs = []
+    for i in range(40):
+        logs.append({
+            "timestamp": now - timedelta(minutes=random.randint(1, 6*60)),
+            "evento": random.choices(event_types, weights=[8,6,4,4,2,2,3,5])[0],
+            "origem": random.choice(origins),
+            "severidade": random.choices(severities, weights=[3,4,2,1])[0]
+        })
+    df_logs = pd.DataFrame(logs).sort_values("timestamp", ascending=False)
+    st.subheader("📡 Logs (simulados)")
+    st.dataframe(df_logs.head(30), use_container_width=True)
+
+    # Motor simples de regras
+    st.subheader("🤖 Regras aplicadas e Riscos detectados")
+    rules = {
+        "Falha de Login": ("Possível brute force (múltiplas falhas de autenticação)", "Alta"),
+        "Acesso Fora do Horário": ("Acesso suspeito fora do horário habitual", "Média"),
+        "Arquivo Suspeito Detetado": ("Arquivo potencialmente malicioso detectado por EDR", "Crítica"),
+        "Pico de CPU": ("Consumo anormal de CPU — possível DoS ou processo maligno", "Alta"),
+        "Pico de Rede": ("Tráfego incomum — possível exfiltração", "Alta"),
+        "Serviço Vulnerável (CVE)": ("Software com CVE conhecido exposto em produção", "Crítica"),
+        "Atividade Anómala de Utilizador": ("Comportamento de utilizador fora do padrão", "Alta"),
+        "Erros Repetidos na Aplicação": ("Erros persistentes que podem causar indisponibilidade", "Média"),
+    }
+
+    detected = []
+    for _, row in df_logs.iterrows():
+        evt = row["evento"]
+        if evt in rules:
+            desc, sev = rules[evt]
+            detected.append({
+                "timestamp": row["timestamp"],
+                "evento": evt,
+                "risco": desc,
+                "severidade": sev,
+                "origem": row["origem"]
+            })
+    df_detected = pd.DataFrame(detected).sort_values("timestamp", ascending=False)
+    if df_detected.empty:
+        st.info("Nenhum risco detectado na simulação.")
+    else:
+        st.dataframe(df_detected.head(40), use_container_width=True)
+
+    # Indicadores
+    st.subheader("📊 Indicadores (simulados)")
+    if not df_detected.empty:
+        sev_counts = df_detected["severidade"].value_counts().reset_index()
+        sev_counts.columns = ["severidade", "count"]
+        bar = alt.Chart(sev_counts).mark_bar().encode(x="severidade:N", y="count:Q", color="severidade:N", tooltip=["severidade","count"])
+        st.altair_chart(bar, use_container_width=True)
+
+        # origem dos eventos
+        orig_counts = df_detected["origem"].value_counts().reset_index()
+        orig_counts.columns = ["origem","count"]
+        pie = alt.Chart(orig_counts).mark_arc(innerRadius=50).encode(theta="count:Q", color="origem:N", tooltip=["origem","count"])
+        st.altair_chart(pie, use_container_width=True)
+
+        # tendência temporal (últimas horas)
+        df_detected["hour"] = df_detected["timestamp"].dt.floor("H")
+        trend = df_detected.groupby("hour").size().reset_index(name="count")
+        line = alt.Chart(trend).mark_line(point=True).encode(x="hour:T", y="count:Q", tooltip=["hour","count"])
+        st.altair_chart(line, use_container_width=True)
+    st.success("Simulação de deteção automática concluída. No ambiente real, estes eventos viriam via coletores/SIEM/EDR/CVE feeds.")
+
+# --------------------------
+# Admin page
 # --------------------------
 @require_roles(("admin",))
 def page_admin():
@@ -600,7 +667,6 @@ def page_admin():
         users_df = pd.read_sql(select(users.c.id, users.c.username, users.c.role, users.c.full_name), conn)
     st.subheader("Usuários")
     st.dataframe(users_df, use_container_width=True)
-
     with st.form("create_user"):
         username = st.text_input("Login")
         fullname = st.text_input("Nome completo")
@@ -614,7 +680,6 @@ def page_admin():
                 new_id = res.inserted_primary_key[0]
             log_action(st.session_state["user"]["username"], st.session_state["user"]["role"], "create_user", "users", new_id, details=username)
             st.success("Usuário criado")
-
     st.divider()
     st.subheader("Logs de Auditoria (últimas 200 ações)")
     with engine.connect() as conn:
@@ -622,7 +687,7 @@ def page_admin():
     st.dataframe(logs, use_container_width=True)
 
 # --------------------------
-# APLICAÇÃO MAIN
+# Main
 # --------------------------
 def main():
     st.set_page_config(page_title="CISP Governance", layout="wide", page_icon="🛡️")
